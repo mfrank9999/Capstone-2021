@@ -43,7 +43,7 @@ dataLoc <- "CM_Data" #directory for expression data Note all directory paths sho
 
 genesPerRegulon <- 50
 edgeWeightThreshold <- 0.001
-correlationThreshold <- 0.07
+correlationThreshold <- 0.03
 #IMPORTANT: Currently data is expected to be in the following format:
 #file type = .csv file
 #Rows =  cells
@@ -80,66 +80,9 @@ runCorrelation(expMat, scenicOptions)
 scenicOptions <- runSCENIC_1_coexNetwork2modules(scenicOptions, topThr = c(edgeWeightThreshold)) #saving to scenicOptions just saves current progress
 coexMethodName <- paste("w", format(edgeWeightThreshold, scientific=FALSE), sep="")
 scenicOptions <- runSCENIC_2_createRegulons(scenicOptions, coexMethod=c(coexMethodName), onlyPositiveCorr = FALSE)
-
-#Process SCENIC output
-regulonTargetsInfo <- readRDS(getIntName(scenicOptions, "regulonTargetsInfo"))
-#keep coexmodule containing all spearman correlations
-regulonTargetsInfo <- regulonTargetsInfo[which(regulonTargetsInfo$coexModule == paste0(coexMethodName,"IgnCorr"))]
-#remove all rows that have genes that aren't TFs
-regulonTargetsInfo <- regulonTargetsInfo[regulonTargetsInfo$gene %in% regulonTargetsInfo$TF,]
-#remove all self regulators (should these be removed?)
-regulonTargetsInfo <- regulonTargetsInfo[!which(regulonTargetsInfo$TF == regulonTargetsInfo$gene),]
-#remove all non-correlated relationships
-regulonTargetsInfo <- regulonTargetsInfo[which(abs(regulonTargetsInfo$spearCor) > correlationThreshold), ]
-#trim further if needed
-regulonTargetsInfo <- regulonTargetsInfo[which(regulonTargetsInfo$CoexWeight > 2*edgeWeightThreshold), ]
-#create regulons
-regulonTargetsInfo_splitByAnnot <- split(regulonTargetsInfo, regulonTargetsInfo$highConfAnnot)
-regulons <- NULL
-if(!is.null(regulonTargetsInfo_splitByAnnot[["TRUE"]]))
-{
-  regulons <- lapply(split(regulonTargetsInfo_splitByAnnot[["TRUE"]], regulonTargetsInfo_splitByAnnot[["TRUE"]][,"TF"]), function(x) sort(as.character(unlist(x[,"gene"]))))
-}
-regulons_extended <- NULL
-if(!is.null(regulonTargetsInfo_splitByAnnot[["FALSE"]]))
-{
-  regulons_extended <- lapply(split(regulonTargetsInfo_splitByAnnot[["FALSE"]],regulonTargetsInfo_splitByAnnot[["FALSE"]][,"TF"]), function(x) unname(unlist(x[,"gene"])))
-  regulons_extended <- setNames(lapply(names(regulons_extended), function(tf) sort(unique(c(regulons[[tf]], unlist(regulons_extended[[tf]]))))), names(regulons_extended))
-  names(regulons_extended) <- paste(names(regulons_extended), "_extended", sep="")
-}
-regulons <- c(regulons, regulons_extended)
-length(unique(names(regulons)))
-saveRDS(regulons, file=getIntName(scenicOptions, "regulons"))
-
-incidList <- reshape2::melt(regulons)
-incidMat <- table(incidList[,2], incidList[,1])
-saveRDS(incidMat, file=getIntName(scenicOptions, "regulons_incidMat"))
-
-network <- regulonTargetsInfo[,c(1,2)]
-network$edge <- as.numeric(regulonTargetsInfo$spearCor > correlationThreshold) - as.numeric(regulonTargetsInfo$spearCor < -correlationThreshold)
-saveRDS(network, file=file.path(dirname(getOutName(scenicOptions, "s2_motifEnrichment")), "networkForRACIPE"))
+network <- createNetwork(edgeWeightThreshold = edgeWeightThreshold, correlationThreshold = correlationThreshold)
 scenicOptions <- runSCENIC_3_scoreCells(scenicOptions, expMat, skipBinaryThresholds = TRUE, skipHeatmap = TRUE , skipTsne = TRUE)
-write.table(network,row.names = FALSE,col.names = TRUE, sep = ",", file=file.path(dirname(getOutName(scenicOptions, "s2_motifEnrichment")), "networkForRACIPE.csv"),quote = FALSE)
-
-# genie3ll <- readRDS(getIntName(scenicOptions, "genie3ll"))
-# corrMat <- readRDS(getIntName(scenicOptions, "corrMat"))
-# links <- genie3ll[which(genie3ll$weight>edgeWeightThreshold),]
-# onlyTfs <- links[links$Target %in% links$TF,]
-# modules <- split(onlyTfs, as.factor(onlyTfs$TF))
-# modules <- modules[which(!lapply(modules, function(x) length(rownames((x)))) == 0)]
-# modulesWithCorr <- lapply(modules, function(geneSet) 
-#   {
-#     cutGeneSet <- geneSet
-#     cutGeneSet <- cutGeneSet[order(cutGeneSet$weight, decreasing = TRUE),]
-#     cutGeneSet <- cutGeneSet[1:min(genesPerRegulon,length(rownames(cutGeneSet))),]
-#     tf <- as.character(unique(cutGeneSet$TF))
-#     targets <- as.character(cutGeneSet$Target)
-#     #print(paste0("retrieving TF: ", tf, " and targets: ", targets))
-#     cbind(cutGeneSet, correlation=c(as.numeric(corrMat[tf,targets] > correlationThreshold) - as.numeric(corrMat[tf,targets] < -correlationThreshold)))
-#   })
-# meltedModules<-reshape2::melt(modulesWithCorr, id.vars = c("TF", "Target", "weight", "correlation"))[1:4]
-# network <-meltedModules[which(meltedModules$correlation!=0),]
-# length(unique(network$TF))
+regulonAUC <- getAUC(readRDS(getIntName(scenicOptions, "aucell_regulonAUC")))
 #=================================================FUNCTIONS==================================================
 
 #takes list of file names and outputs list of data (cells are annotated based on which file they are from)
@@ -200,9 +143,7 @@ filterMergedData <- function(mergedData, maxCellsPerCondition = 0, maxGenes = 0,
     groupNames <- gsub(pattern = "_(?:.(?!_))+$", "", colnames(cutMat), perl = TRUE)
     groupNames <- groupNames[!duplicated(groupNames)]
     for(i in 1:length(groupNames)){
-      if(TRUE){
-        print(paste0("cutting group: ", groupNames[i]))
-      }
+      print(paste0("cutting group: ", groupNames[i]))
       columnsInGroup <- grep(groupNames[i], colnames(cutMat))
       if(length(columnsInGroup)>maxCellsPerCondition){
         toRemove <- columnsInGroup[(maxCellsPerCondition+1):length(columnsInGroup)]
@@ -355,4 +296,47 @@ setOutputDirectory <- function(scenicOptions, outputDirectory = NA){
     }
   }
   return(scenicOptions)
+}
+
+createNetwork <- function(edgeWeightThreshold = 0.001, correlationThreshold = 0.03){
+  #Process SCENIC output
+  regulonTargetsInfo <- readRDS(getIntName(scenicOptions, "regulonTargetsInfo"))
+  #keep coexmodule containing all spearman correlations
+  regulonTargetsInfo <- regulonTargetsInfo[which(regulonTargetsInfo$coexModule == paste0(coexMethodName,"IgnCorr"))]
+  #remove all rows that have genes that aren't TFs
+  regulonTargetsInfo <- regulonTargetsInfo[regulonTargetsInfo$gene %in% regulonTargetsInfo$TF,]
+  #remove all self regulators (should these be removed?)
+  regulonTargetsInfo <- regulonTargetsInfo[!which(regulonTargetsInfo$TF == regulonTargetsInfo$gene),]
+  #remove all non-correlated relationships
+  regulonTargetsInfo <- regulonTargetsInfo[which(abs(regulonTargetsInfo$spearCor) > correlationThreshold), ]
+  #trim further if needed
+  regulonTargetsInfo <- regulonTargetsInfo[which(regulonTargetsInfo$CoexWeight > 2*edgeWeightThreshold), ]
+  regulons <- createRegulons(regulonTargetsInfo = regulonTargetsInfo)
+  network <- regulonTargetsInfo[,c(1,2)]
+  network$edge <- as.numeric(regulonTargetsInfo$spearCor > correlationThreshold) - as.numeric(regulonTargetsInfo$spearCor < -correlationThreshold)
+  colnames(network) <- c("source","target", "type")
+  write.table(network,row.names = FALSE,col.names = TRUE, sep = ",", file=file.path(dirname(getOutName(scenicOptions, "s2_motifEnrichment")), "networkForRACIPE.csv"),quote = FALSE)
+  
+  
+  
+  return(network)
+}
+createRegulons <- function(regulonTargetsInfo){
+  #create and save regulons
+  regulonTargetsInfo_splitByAnnot <- split(regulonTargetsInfo, regulonTargetsInfo$highConfAnnot)
+  regulons <- NULL
+  if(!is.null(regulonTargetsInfo_splitByAnnot[["TRUE"]]))
+  {
+    regulons <- lapply(split(regulonTargetsInfo_splitByAnnot[["TRUE"]], regulonTargetsInfo_splitByAnnot[["TRUE"]][,"TF"]), function(x) sort(as.character(unlist(x[,"gene"]))))
+  }
+  regulons_extended <- NULL
+  if(!is.null(regulonTargetsInfo_splitByAnnot[["FALSE"]]))
+  {
+    regulons_extended <- lapply(split(regulonTargetsInfo_splitByAnnot[["FALSE"]],regulonTargetsInfo_splitByAnnot[["FALSE"]][,"TF"]), function(x) unname(unlist(x[,"gene"])))
+    regulons_extended <- setNames(lapply(names(regulons_extended), function(tf) sort(unique(c(regulons[[tf]], unlist(regulons_extended[[tf]]))))), names(regulons_extended))
+    names(regulons_extended) <- paste(names(regulons_extended), "_extended", sep="")
+  }
+  regulons <- c(regulons, regulons_extended)
+  saveRDS(regulons, file=getIntName(scenicOptions, "regulons"))
+  return(regulons)
 }
