@@ -1,91 +1,74 @@
-#===============================================INITIALIZATION==============================================
-install.packages(c("stringr", "jsonlite", "sjmisc", "MASS", "UpSetR", "ggplot2", "googledrive","dplyr"))
-install.packages(c("varhandle", "plyr", "ggpmisc", "spatstat.utils", "umap", "ggthemes","RColorBrewer","infotheo")) # rowr?
-install.packages("BiocManager")
-#need for database reading (feather file)
-#needed to convert between gene ID types
-install.packages("gprofiler2")
-BiocManager::install("arrow")
-BiocManager::install("Seurat")
-BiocManager::install(c("RcisTarget"))
-BiocManager::install(c("zoo", "mixtools", "rbokeh"))
-# For various visualizations and perform t-SNEs:
-BiocManager::install(c("DT", "NMF", "ComplexHeatmap", "R2HTML", "Rtsne"))
-# To support paralell execution (not available in Windows):
-BiocManager::install(c("doMC", "doRNG"))
-BiocManager::install("BiocParallel")
-install.packages("devtools")
+install.packages(c("stringr", "jsonlite", "sjmisc", "MASS", "UpSetR", "ggplot2", "googledrive","dplyr","varhandle", "plyr", "ggpmisc", "spatstat.utils", "umap", "ggthemes","RColorBrewer","infotheo","BiocManager", "gprofiler2", "devtools"))
+BiocManager::install(c("arrow", "Seurat", "RcisTarget","zoo", "mixtools", "rbokeh","DT", "NMF", "ComplexHeatmap", "R2HTML", "Rtsne","doMC", "doRNG","BiocParallel"))
 devtools::install_github("aertslab/SCopeLoomR", build_vignettes = TRUE)
 devtools::install_github("aertslab/SCENIC")
 devtools::install_github("aertslab/AUCell")
-packageVersion("SCENIC")
 
 library(remotes)
-remotes::install_version("spatstat", version = "1.64-1")
-rm(list = ls()) # clean workspace
-
 library(Seurat)
 library(stringr)
 library(sjmisc)
 library(MASS)
 library(SCENIC)
 library(gprofiler2)
+
+remotes::install_version("spatstat", version = "1.64-1")
+
+rm(list = ls()) # clean workspace
+
 #===============================================PARAMETERS===================================================
-cpuCores <-24 #number of cpu cores genie3 will use (should be 4 if using personal device or equal to the # of cores used in OOD)
-targetsPerPart <- 1000 #targets per part. Genie3 splits its run by targets, with weight matrices being saved after each part in a seperate RDS file for later use
-#setting targets per part to 0 will default to 10 parts, regardless of # of genes
-numGenes = 10000
-resumePreviousRun <- FALSE #set to true if your previous run was interrupted. Will resume from the last completed part
-maxCellsPerCondition <- 200 #maximum number of cells used for each file provided.
-#setting cells per condition to 0 will default to no maximum (all cells will be used)
-dbDir <- "databases" #directory for RcisTarget DBs (these must be downloaded seperately) Note all directory paths should be in relation to the working directory
-dataLoc <- "CM_Data" #directory for expression data Note all directory paths should be in relation to the working directory
 
-genesPerRegulon <- 50
-edgeWeightThreshold <- 0.001
-correlationThreshold <- 0.03
-#IMPORTANT: Currently data is expected to be in the following format:
-#file type = .csv file
-#Rows =  cells
-#Columns = genes
-#Gene notation = any
-#================================================PREPROCESSING================================================
-files <- list.files(dataLoc, pattern = ".\\.csv" )
-data <- readFiles(files[2:5])
-mergedData <- mergeData(data)
-mergedData <- seuratPreprocess(mergedData, minCells = 3, minGenes = 200, numGenes = numGenes)
-mergedData <- convertGeneNames(mergedData)
-#===============================================NETWORK CREATION==============================================
-
+#SCENIC Options Parameters and Initialization
+cpuCores <-24
+dbDir <- "databases"
+dataLoc <- "CM_Data"
 organism <- "hgnc"
 dbs <- c("hg19-500bp-upstream-7species.mc9nr.feather", "hg19-tss-centered-5kb-7species.mc9nr.feather", "hg19-tss-centered-10kb-7species.mc9nr.feather")
 scenicOptions <- SCENIC::initializeScenic(org = organism, dbDir = dbDir, dbs = dbs)  
 scenicOptions@settings$verbose <- TRUE
 scenicOptions@settings$nCores <- cpuCores
 
-#tsData <- runTime(mergedData, lengthPoints = c(50,100,200,500), scenicOptions)
 
-expMat <- as.matrix(filterMergedData(mergedData, maxCellsPerCondition = maxCellsPerCondition, filtered = TRUE, scenicOptions = scenicOptions))
-#Save preprocessed data
-write.table(expMat,row.names = TRUE,col.names = NA, sep = ",", file=file.path(dirname(getOutName(scenicOptions, "s2_motifEnrichment")), "processesedData.csv"),quote = FALSE)
+#Seurat Preprocessing Parameters
+numGenes = 1000 #number of variable features to keep
 
-if(targetsPerPart>0){
-  nParts <- length(rownames(expMat))/targetsPerPart
-} else {
-  nParts <- 10
+#Preprocessing Parameters
+maxCellsPerCondition <- 0
+
+#GENIE3 Parameters
+targetsPerPart <- 1000
+resumePreviousRun <- FALSE
+
+#Network Postprocessing Parameters
+edgeWeightThreshold <- 0.001
+correlationThreshold <- 0.03
+
+
+#IMPORTANT: Currently data is expected to be in the following format:
+#file type = .csv file
+#Rows =  cells
+#Columns = genes
+#Gene notation = any
+
+#===============================================CODE TO RUN===================================================
+files <- list.files(dataLoc, pattern = ".\\.csv" )
+
+transitions <- data.frame(name = c("Sequential 2-3", "Sequential 3-4", "Sequential 4-5", "Combined 2-5"), start = c(2,3,4,2), end = c(3,4,5,5), data = vector(mode = "list", length = 4))
+for (i in 1:length(transitions$name)) {
+  print(paste0("Creating data for transition ", transitions$name[i]))
+  data <- readFiles(files[transitions$start[i]:transitions$end[i]])
+  transitions$data[[i]] <- list(mergeData(data))
 }
-print(Sys.time())
-runGenie3(expMat, scenicOptions, nParts = nParts, resumePreviousRun = resumePreviousRun)
-runCorrelation(expMat, scenicOptions)
-scenicOptions <- runSCENIC_1_coexNetwork2modules(scenicOptions, topThr = c(edgeWeightThreshold)) #saving to scenicOptions just saves current progress
-coexMethodName <- paste("w", format(edgeWeightThreshold, scientific=FALSE), sep="")
-scenicOptions <- runSCENIC_2_createRegulons(scenicOptions, coexMethod=c(coexMethodName), onlyPositiveCorr = FALSE)
-network <- createNetwork(edgeWeightThreshold = edgeWeightThreshold, correlationThreshold = correlationThreshold)
-scenicOptions <- runSCENIC_3_scoreCells(scenicOptions, expMat, skipBinaryThresholds = TRUE, skipHeatmap = TRUE , skipTsne = TRUE)
-regulonAUC <- getAUC(readRDS(getIntName(scenicOptions, "aucell_regulonAUC")))
-#=================================================FUNCTIONS==================================================
 
-#takes list of file names and outputs list of data (cells are annotated based on which file they are from)
+network <- runNetworkCreation(transitions$data[[4]], scenicOptions = scenicOptions, maxCellsPerCondition = maxCellsPerCondition, targetsPerPart = targetsPerPart, edgeWeightThreshold = edgeWeightThreshold, correlationThreshold = correlationThreshold, outputLocation = "CM_Network")
+
+
+
+
+#=================================================FUNCTIONS===================================================
+
+
+#-----------------------------------------------PREPROCESSING-------------------------------------------------
 readFiles <- function(files, maxCellsPerCondition = 0) {
   data <- vector(mode = "list", length = length(files))
   for(i in seq_along(files)){
@@ -100,8 +83,6 @@ readFiles <- function(files, maxCellsPerCondition = 0) {
   }
   return(data)
 }
-
-#takes a list of data and merges it into one matrix, keeping all genes and filling in 0 for gene expression that are missing from data sets
 mergeData <- function(data){
   mergedData <- NULL
   for(j in 1:length(data)){
@@ -120,7 +101,34 @@ mergeData <- function(data){
   mergedData <- as.matrix(mergedData)
   return(mergedData)
 }
-seuratPreprocess <- function(mergedData, minCells = 3, minGenes = 200, numGenes = 2000, projName = "NetworkCreation"){
+convertGeneNames <- function(data, target = "HGNC", verbose = FALSE){
+  rows <- rownames(data)
+  conversion <- gconvert(query = rows, organism = "hsapiens", target = target, mthreshold = 1, filter_na = FALSE)
+  geneNames <-conversion[,4]
+  if(verbose){
+    genesLost <- 0
+    for (j in 1:length(geneNames)){
+      if(is.na(geneNames[j])){
+        genesLost <- genesLost+1
+      }
+    }
+    print(paste0(genesLost," genes lost during gene name conversion"))
+  }
+  .rowNamesDF(data, TRUE) <- geneNames
+  return(data)
+}
+filterData <- function(data, scenicOptions = NULL){
+  if(is.null(scenicOptions)){
+    print("No scenic options provide for scenic filtering")
+    scenicOptions <- reinitializeScenicOptions()
+  }
+  data <- as.matrix(data)
+  genesKept <- geneFiltering(data, scenicOptions=scenicOptions)
+  data <- data[genesKept, ]
+  
+  return(data)
+}
+seuratPreprocess <- function(mergedData, minCells = 3, minGenes = 200, numGenes = 0, projName = "NetworkCreation"){
   if(typeof(mergedData) == "list"){
     mergedSeurat <- Seurat::CreateSeuratObject(mergedData[[1]], project ="Network Creation", assay = "RNA", min.cells = minCells, min.features = minGenes)
     for(i in 2:length(mergedData)){
@@ -131,11 +139,20 @@ seuratPreprocess <- function(mergedData, minCells = 3, minGenes = 200, numGenes 
     mergedSeurat <- Seurat::CreateSeuratObject(mergedData, project =projName, assay = "RNA", min.cells = minCells, min.features = minGenes)
   }
   mergedSeurat <- NormalizeData(mergedSeurat, normalization.method = "LogNormalize")
-  mergedSeurat <- FindVariableFeatures(mergedSeurat, selection.method = "vst", nFeatures = numGenes)
   dataReturn <- as.matrix(Seurat::GetAssayData(mergedSeurat, slot = "data"))
+  
+  if(numGenes > 0){
+    mergedSeurat <- FindVariableFeatures(mergedSeurat, selection.method = "vst", nfeatures = numGenes)
+    print(paste0("Keeping ", length(VariableFeatures(mergedSeurat)), " variable features"))
+    dataReturn <- dataReturn[rownames(dataReturn) %in% VariableFeatures(mergedSeurat),]
+    if(length(rownames(dataReturn))!=length(VariableFeatures(mergedSeurat))){
+      print(paste0("Only ", length(rownames(dataReturn)), "remain"))
+    }
+  }
+  
+  return(dataReturn)
 }
-#filters merged data using the file name in the cell annotation to seperate data. Can be used to limit the number of cells per condition, cut the number of genes, or filter genes using SCENICs filter method
-filterMergedData <- function(mergedData, maxCellsPerCondition = 0, maxGenes = 0, scenicOptions = NULL, filtered = FALSE, verbose = FALSE){
+cutMergedData <- function(mergedData, maxCellsPerCondition = 0, maxGenes = 0, verbose = FALSE){
   cutMat<-mergedData
   cutMat <- as.matrix(cutMat)
   #cut cells
@@ -153,47 +170,101 @@ filterMergedData <- function(mergedData, maxCellsPerCondition = 0, maxGenes = 0,
     }
   }
   
-  if(filtered){
-    if(is.null(scenicOptions)){
-      print("No scenic options provide for scenic filtering")
-      scenicOptions <- reinitializeScenicOptions()
-    }
-    genesKept <- geneFiltering(cutMat, scenicOptions=scenicOptions)
-    cutMat <- cutMat[genesKept, ]
-  }
-  
   if(maxGenes>0){
     cutMat <- cutMat[1:maxGenes,]
   }
   return(cutMat)
 }
 
+#---------------------------------------------NETWORK CREATION------------------------------------------------
 
-#converts gene names from any gene naming method to the specified target method
-convertGeneNames <- function(data, target = "HGNC", verbose = FALSE){
-  rows <- rownames(data)
-  conversion <- gconvert(query = rows, organism = "hsapiens", target = target, mthreshold = 1, filter_na = FALSE)
-  geneNames <-conversion[,4]
-  if(verbose){
-    genesLost <- 0
-    for (j in 1:length(geneNames)){
-      if(is.na(geneNames[j])){
-        genesLost <- genesLost+1
-      }
-    }
-    print(paste0(genesLost," genes lost during gene name conversion"))
+createNetwork <- function(edgeWeightThreshold = 0.001, correlationThreshold = 0.03, scenicOptions = scenicOptions, coexMethodName){
+  #Process SCENIC output
+  regulonTargetsInfo <- readRDS(getIntName(scenicOptions, "regulonTargetsInfo"))
+  #keep coexmodule containing all spearman correlations
+  regulonTargetsInfo <- regulonTargetsInfo[which(regulonTargetsInfo$coexModule == paste0(coexMethodName,"IgnCorr"))]
+  #remove all rows that have genes that aren't TFs
+  regulonTargetsInfo <- regulonTargetsInfo[regulonTargetsInfo$gene %in% regulonTargetsInfo$TF,]
+  #remove all self regulators (should these be removed?)
+  regulonTargetsInfo <- regulonTargetsInfo[!which(regulonTargetsInfo$TF == regulonTargetsInfo$gene),]
+  #remove all non-correlated relationships
+  regulonTargetsInfo <- regulonTargetsInfo[which(abs(regulonTargetsInfo$spearCor) > correlationThreshold), ]
+  #trim further if needed
+  regulonTargetsInfo <- regulonTargetsInfo[which(regulonTargetsInfo$CoexWeight > 2*edgeWeightThreshold), ]
+  regulons <- createRegulons(regulonTargetsInfo = regulonTargetsInfo)
+  network <- regulonTargetsInfo[,c(1,2)]
+  network$edge <- as.numeric(regulonTargetsInfo$spearCor > correlationThreshold) - as.numeric(regulonTargetsInfo$spearCor < -correlationThreshold)
+  colnames(network) <- c("source","target", "type")
+  write.table(network,row.names = FALSE,col.names = TRUE, sep = ",", file=file.path(dirname(getOutName(scenicOptions, "s2_motifEnrichment")), "networkForRACIPE.csv"),quote = FALSE)
+  
+  
+  
+  return(network)
+}
+createRegulons <- function(regulonTargetsInfo){
+  #create and save regulons
+  regulonTargetsInfo_splitByAnnot <- split(regulonTargetsInfo, regulonTargetsInfo$highConfAnnot)
+  regulons <- NULL
+  if(!is.null(regulonTargetsInfo_splitByAnnot[["TRUE"]]))
+  {
+    regulons <- lapply(split(regulonTargetsInfo_splitByAnnot[["TRUE"]], regulonTargetsInfo_splitByAnnot[["TRUE"]][,"TF"]), function(x) sort(as.character(unlist(x[,"gene"]))))
   }
-  .rowNamesDF(data, TRUE) <- geneNames
-  return(data)
+  regulons_extended <- NULL
+  if(!is.null(regulonTargetsInfo_splitByAnnot[["FALSE"]]))
+  {
+    regulons_extended <- lapply(split(regulonTargetsInfo_splitByAnnot[["FALSE"]],regulonTargetsInfo_splitByAnnot[["FALSE"]][,"TF"]), function(x) unname(unlist(x[,"gene"])))
+    regulons_extended <- setNames(lapply(names(regulons_extended), function(tf) sort(unique(c(regulons[[tf]], unlist(regulons_extended[[tf]]))))), names(regulons_extended))
+    names(regulons_extended) <- paste(names(regulons_extended), "_extended", sep="")
+  }
+  regulons <- c(regulons, regulons_extended)
+  saveRDS(regulons, file=getIntName(scenicOptions, "regulons"))
+  return(regulons)
+}
+runNetworkCreation <-function(mergedData, scenicOptions, numGenes = 10000, maxCellsPerCondition = 0, targetsPerPart = 1000, edgeWeightThreshold, correlationThreshold, outputLocation = NA){
+  print(paste0("Beginning network creation at ",Sys.time()))
+  #create new save location and reset scenic options
+  print("Initializing Scenic Options")
+  scenicOptions <- reinitializeScenicOptions(scenicOptions)
+  scenicOptions <- setOutputDirectory(scenicOptions, outputDirectory = outputLocation)
+  
+  print(paste0("Preprocessing data ",Sys.time()))
+  #preprocess data
+  mergedData <- convertGeneNames(mergedData)
+  mergedData <- filterData(mergedData, scenicOptions)
+  mergedData <- seuratPreprocess(mergedData, minCells = 3, minGenes = 200, numGenes = numGenes)
+  expMat <- as.matrix(cutMergedData(mergedData, maxCellsPerCondition = maxCellsPerCondition))
+  write.table(expMat,row.names = TRUE,col.names = NA, sep = ",", file=file.path(dirname(getOutName(scenicOptions, "s2_motifEnrichment")), "processesedData.csv"),quote = FALSE)
+  
+  #numParts
+  if(targetsPerPart>0){
+    nParts <- length(rownames(expMat))/targetsPerPart
+  } else {
+    nParts <- 10
+  }
+  
+  
+  print(paste0("Creating Network (Using ", nParts, " parts) ", Sys.time()))
+  #create network
+  runGenie3(expMat, scenicOptions, nParts = nParts, resumePreviousRun = resumePreviousRun)
+  runCorrelation(expMat, scenicOptions)
+  scenicOptions <- runSCENIC_1_coexNetwork2modules(scenicOptions, topThr = c(edgeWeightThreshold)) #saving to scenicOptions just saves current progress
+  coexMethodName <- paste("w", format(edgeWeightThreshold, scientific=FALSE), sep="")
+  scenicOptions <- runSCENIC_2_createRegulons(scenicOptions, coexMethod=c(coexMethodName), onlyPositiveCorr = FALSE)
+  network <- createNetwork(scenicOptions = scenicOptions, edgeWeightThreshold = edgeWeightThreshold, correlationThreshold = correlationThreshold, coexMethodName = coexMethodName)
+  scenicOptions <- runSCENIC_3_scoreCells(scenicOptions, expMat, skipBinaryThresholds = TRUE, skipHeatmap = TRUE , skipTsne = TRUE)
+  regulonAUC <- getAUC(readRDS(getIntName(scenicOptions, "aucell_regulonAUC")))
+  
+  print(paste0("Network Complete! Nodes: ", length(unique(network$source)), " , Edges: ", length(newtork$source)))
+  return(network)
 }
 
-#used to easily evaluate run time vs cell# 
+#----------------------------------------AUTOMATION AND ORGANIZATION------------------------------------------
 runTime <- function(mergedData, lengthPoints, scenicOptions){
   tsData <- data.frame(timeDif = rep(0,length(lengthPoints)), cells = rep(0, length(lengthPoints)), genes = rep(0, length(lengthPoints)))
   for (i in 1:length(lengthPoints)){
     scenicOptions <- reinitializeScenicOptions(scenicOptions)
     print(paste0("running length ", lengthPoints[i]))
-    expMat <- as.matrix(filterMergedData(mergedData, maxCellsPerCondition = lengthPoints[i], filter = TRUE, scenicOptions = scenicOptions))
+    expMat <- as.matrix(cutMergedData(mergedData, maxCellsPerCondition = lengthPoints[i], filter = TRUE, scenicOptions = scenicOptions))
     start = Sys.time()
     runGenie3(expMat, scenicOptions)
     end = Sys.time()
@@ -208,7 +279,25 @@ runTime <- function(mergedData, lengthPoints, scenicOptions){
   return(tsData)
   
 }
-#resets scenic options before a run (clean data)
+createNetworkParameters <- function(data, numGenes = 10000, maxCellsPerCondition = 0, edgeWeightThreshold, correlationThreshold){
+  data = mergedData
+  maxCellsPerCondition = c(200,0)
+  numGenes = 1000
+  edgeWeightThreshold = c(0.0005, 0.001)
+  correlationThreshold = c(0.01, 0.03)
+  if(typeof(data) != "list"){
+    data <- list(data)
+  }
+  nwConditions <- expand.grid(maxCellsPerCondition,numGenes,edgeWeightThreshold,correlationThreshold, 1:length(data))
+  
+  colnames(nwConditions) <- c("maxCellsPerCondition", "numGenes", "edgeWeightThreshold", "correlationThreshold", "dataPosition")
+  networks <- vector(mode = "list", length = length(rownames(nwConditions)))
+  
+  for(i in 1:length(rownames(nwConditions))){
+    networks[[i]] <- list(parameters = nwConditions[i,], data = data[[nwConditions[i,5]]])
+  }
+  return(networks)
+}
 reinitializeScenicOptions <- function(scenicOptions = NULL){
   if(is.null(scenicOptions)){
     print(paste0("No scenic options provided, initializing with default parameters"))
@@ -228,8 +317,6 @@ reinitializeScenicOptions <- function(scenicOptions = NULL){
   
   return(scenicOptions)
 }
-
-#used to change the target directory for SCENIC output
 setOutputDirectory <- function(scenicOptions, outputDirectory = NA){
   if(!(is.na(outputDirectory) | outputDirectory=="")){
     if(!dir.exists(outputDirectory)){
@@ -238,8 +325,8 @@ setOutputDirectory <- function(scenicOptions, outputDirectory = NA){
     if(!dir.exists(file.path(outputDirectory,"int"))){
       dir.create(file.path(outputDirectory,"int"))
     }
-    if(!dir.exists(file.path(outputDirectory,"out"))){
-      dir.create(file.path(outputDirectory,"out"))
+    if(!dir.exists(file.path(outputDirectory,"output"))){
+      dir.create(file.path(outputDirectory,"output"))
     }
   }
   
@@ -296,47 +383,4 @@ setOutputDirectory <- function(scenicOptions, outputDirectory = NA){
     }
   }
   return(scenicOptions)
-}
-
-createNetwork <- function(edgeWeightThreshold = 0.001, correlationThreshold = 0.03){
-  #Process SCENIC output
-  regulonTargetsInfo <- readRDS(getIntName(scenicOptions, "regulonTargetsInfo"))
-  #keep coexmodule containing all spearman correlations
-  regulonTargetsInfo <- regulonTargetsInfo[which(regulonTargetsInfo$coexModule == paste0(coexMethodName,"IgnCorr"))]
-  #remove all rows that have genes that aren't TFs
-  regulonTargetsInfo <- regulonTargetsInfo[regulonTargetsInfo$gene %in% regulonTargetsInfo$TF,]
-  #remove all self regulators (should these be removed?)
-  regulonTargetsInfo <- regulonTargetsInfo[!which(regulonTargetsInfo$TF == regulonTargetsInfo$gene),]
-  #remove all non-correlated relationships
-  regulonTargetsInfo <- regulonTargetsInfo[which(abs(regulonTargetsInfo$spearCor) > correlationThreshold), ]
-  #trim further if needed
-  regulonTargetsInfo <- regulonTargetsInfo[which(regulonTargetsInfo$CoexWeight > 2*edgeWeightThreshold), ]
-  regulons <- createRegulons(regulonTargetsInfo = regulonTargetsInfo)
-  network <- regulonTargetsInfo[,c(1,2)]
-  network$edge <- as.numeric(regulonTargetsInfo$spearCor > correlationThreshold) - as.numeric(regulonTargetsInfo$spearCor < -correlationThreshold)
-  colnames(network) <- c("source","target", "type")
-  write.table(network,row.names = FALSE,col.names = TRUE, sep = ",", file=file.path(dirname(getOutName(scenicOptions, "s2_motifEnrichment")), "networkForRACIPE.csv"),quote = FALSE)
-  
-  
-  
-  return(network)
-}
-createRegulons <- function(regulonTargetsInfo){
-  #create and save regulons
-  regulonTargetsInfo_splitByAnnot <- split(regulonTargetsInfo, regulonTargetsInfo$highConfAnnot)
-  regulons <- NULL
-  if(!is.null(regulonTargetsInfo_splitByAnnot[["TRUE"]]))
-  {
-    regulons <- lapply(split(regulonTargetsInfo_splitByAnnot[["TRUE"]], regulonTargetsInfo_splitByAnnot[["TRUE"]][,"TF"]), function(x) sort(as.character(unlist(x[,"gene"]))))
-  }
-  regulons_extended <- NULL
-  if(!is.null(regulonTargetsInfo_splitByAnnot[["FALSE"]]))
-  {
-    regulons_extended <- lapply(split(regulonTargetsInfo_splitByAnnot[["FALSE"]],regulonTargetsInfo_splitByAnnot[["FALSE"]][,"TF"]), function(x) unname(unlist(x[,"gene"])))
-    regulons_extended <- setNames(lapply(names(regulons_extended), function(tf) sort(unique(c(regulons[[tf]], unlist(regulons_extended[[tf]]))))), names(regulons_extended))
-    names(regulons_extended) <- paste(names(regulons_extended), "_extended", sep="")
-  }
-  regulons <- c(regulons, regulons_extended)
-  saveRDS(regulons, file=getIntName(scenicOptions, "regulons"))
-  return(regulons)
 }
