@@ -30,18 +30,18 @@ scenicOptions@settings$nCores <- cpuCores
 
 
 #Seurat Preprocessing Parameters
-numGenes = 1000 #number of variable features to keep
+numGenes = 1000 #number of variable features to keep (setting to 0 will keep all genes)
 
 #Preprocessing Parameters
-maxCellsPerCondition <- 0
+maxCellsPerCondition <- 0 # number of cells to keep per condition (setting to 0 will keep all cells)
 
 #GENIE3 Parameters
-targetsPerPart <- 1000
+targetsPerPart <- 1000 # number of targets per part of gene 3 (setting to 0 will default to 10 parts, regardless of number of genes)
 resumePreviousRun <- FALSE
 
 #Network Postprocessing Parameters
-edgeWeightThreshold <- 0.001
-correlationThreshold <- 0.03
+edgeWeightThreshold <- 0.001 #cutoff threshold for relationship weight (any relationship with a weight lower will be removed)
+correlationThreshold <- 0.03 #cutoff threshold for spearman correlation (any relationship with a spearman correlation between +- the threshold will be removed)
 
 
 #IMPORTANT: Currently data is expected to be in the following format:
@@ -53,6 +53,7 @@ correlationThreshold <- 0.03
 #===============================================CODE TO RUN===================================================
 files <- list.files(dataLoc, pattern = ".\\.csv" )
 
+#create different sets of data to use for network creation
 transitions <- data.frame(name = c("Sequential 2-3", "Sequential 3-4", "Sequential 4-5", "Combined 2-5"), start = c(2,3,4,2), end = c(3,4,5,5), data = vector(mode = "list", length = 4))
 for (i in 1:length(transitions$name)) {
   print(paste0("Creating data for transition ", transitions$name[i]))
@@ -60,6 +61,7 @@ for (i in 1:length(transitions$name)) {
   transitions$data[[i]] <- list(mergeData(data))
 }
 
+#create newtork using all data
 network <- runNetworkCreation(transitions$data[[4]], scenicOptions = scenicOptions, maxCellsPerCondition = maxCellsPerCondition, targetsPerPart = targetsPerPart, edgeWeightThreshold = edgeWeightThreshold, correlationThreshold = correlationThreshold, outputLocation = "CM_Network")
 
 
@@ -69,6 +71,7 @@ network <- runNetworkCreation(transitions$data[[4]], scenicOptions = scenicOptio
 
 
 #-----------------------------------------------PREPROCESSING-------------------------------------------------
+#reads files from a list of file names (dataLoc must be set outside of function) renames all cells to include file name
 readFiles <- function(files, maxCellsPerCondition = 0) {
   data <- vector(mode = "list", length = length(files))
   for(i in seq_along(files)){
@@ -83,6 +86,8 @@ readFiles <- function(files, maxCellsPerCondition = 0) {
   }
   return(data)
 }
+
+#merges list of data into one, keeping all genes and replacing missing expression values with 0
 mergeData <- function(data){
   mergedData <- NULL
   for(j in 1:length(data)){
@@ -101,6 +106,8 @@ mergeData <- function(data){
   mergedData <- as.matrix(mergedData)
   return(mergedData)
 }
+
+#converts gene names from any gene name format to the target format (use HGNC for genie3/rcistarget)
 convertGeneNames <- function(data, target = "HGNC", verbose = FALSE){
   rows <- rownames(data)
   conversion <- gconvert(query = rows, organism = "hsapiens", target = target, mthreshold = 1, filter_na = FALSE)
@@ -117,6 +124,8 @@ convertGeneNames <- function(data, target = "HGNC", verbose = FALSE){
   .rowNamesDF(data, TRUE) <- geneNames
   return(data)
 }
+
+#filters data using SCENIC's filtering method (most importantly this removes any genes not in rcistarget, increasing efficiency)
 filterData <- function(data, scenicOptions = NULL){
   if(is.null(scenicOptions)){
     print("No scenic options provide for scenic filtering")
@@ -128,6 +137,10 @@ filterData <- function(data, scenicOptions = NULL){
   
   return(data)
 }
+
+#preprocesses data to cut any cells with low expression (minGenes) and any genes not expressed in many cells (minCells).
+#Keep the top numGenes variable genes (0 indicates that all genes should be kept)
+#Log Normalize expression data
 seuratPreprocess <- function(mergedData, minCells = 3, minGenes = 200, numGenes = 0, projName = "NetworkCreation"){
   if(typeof(mergedData) == "list"){
     mergedSeurat <- Seurat::CreateSeuratObject(mergedData[[1]], project ="Network Creation", assay = "RNA", min.cells = minCells, min.features = minGenes)
@@ -152,6 +165,7 @@ seuratPreprocess <- function(mergedData, minCells = 3, minGenes = 200, numGenes 
   
   return(dataReturn)
 }
+#cuts data that has been previously merged and annotated with file names, cutting data to maxCellsPerCondition cells for each condition and maxGenes genes for the whole dataset
 cutMergedData <- function(mergedData, maxCellsPerCondition = 0, maxGenes = 0, verbose = FALSE){
   cutMat<-mergedData
   cutMat <- as.matrix(cutMat)
@@ -178,6 +192,7 @@ cutMergedData <- function(mergedData, maxCellsPerCondition = 0, maxGenes = 0, ve
 
 #---------------------------------------------NETWORK CREATION------------------------------------------------
 
+#reads SCENIC output file containing regulon targets info and trims the results based on edgeWeightThreshold and correlationThreshold. Also removes all non-transcription factors
 createNetwork <- function(edgeWeightThreshold = 0.001, correlationThreshold = 0.03, scenicOptions = scenicOptions, coexMethodName){
   #Process SCENIC output
   regulonTargetsInfo <- readRDS(getIntName(scenicOptions, "regulonTargetsInfo"))
@@ -201,6 +216,8 @@ createNetwork <- function(edgeWeightThreshold = 0.001, correlationThreshold = 0.
   
   return(network)
 }
+
+#takes regulon target info data and reformats to create regulons. Not vital to process
 createRegulons <- function(regulonTargetsInfo){
   #create and save regulons
   regulonTargetsInfo_splitByAnnot <- split(regulonTargetsInfo, regulonTargetsInfo$highConfAnnot)
@@ -220,6 +237,15 @@ createRegulons <- function(regulonTargetsInfo){
   saveRDS(regulons, file=getIntName(scenicOptions, "regulons"))
   return(regulons)
 }
+
+#full network creation process:
+# 1. initialize scenic option (needs to be reset before every network)
+# 2. preprocesses data (data should be already merged, but not filtered)
+# 3. run Genie3 (output saved in int/1.4_GENIE3_linkList.Rds)
+# 4. run spearman correlation (output save in int/1.2_corrMat.Rds)
+# 5. create TF modules (SCENIC part 1) (output saved in int/1.6_tfModules_asDF.Rds)
+# 6. Run RCisTarget (SCENIC part 2) (output saved in int/2.5_regulonTargetsInfo.Rds)
+# 7. Filter and form network (output saved in out/networkForRACIPE)
 runNetworkCreation <-function(mergedData, scenicOptions, numGenes = 10000, maxCellsPerCondition = 0, targetsPerPart = 1000, edgeWeightThreshold, correlationThreshold, outputLocation = NA){
   print(paste0("Beginning network creation at ",Sys.time()))
   #create new save location and reset scenic options
@@ -259,6 +285,7 @@ runNetworkCreation <-function(mergedData, scenicOptions, numGenes = 10000, maxCe
 }
 
 #----------------------------------------AUTOMATION AND ORGANIZATION------------------------------------------
+#Used to test runtime of genie3 with different data sizes
 runTime <- function(mergedData, lengthPoints, scenicOptions){
   tsData <- data.frame(timeDif = rep(0,length(lengthPoints)), cells = rep(0, length(lengthPoints)), genes = rep(0, length(lengthPoints)))
   for (i in 1:length(lengthPoints)){
@@ -279,6 +306,7 @@ runTime <- function(mergedData, lengthPoints, scenicOptions){
   return(tsData)
   
 }
+#for sweep testing network creation parameters
 createNetworkParameters <- function(data, numGenes = 10000, maxCellsPerCondition = 0, edgeWeightThreshold, correlationThreshold){
   data = mergedData
   maxCellsPerCondition = c(200,0)
@@ -298,6 +326,7 @@ createNetworkParameters <- function(data, numGenes = 10000, maxCellsPerCondition
   }
   return(networks)
 }
+#reinitialize scenicOptions with same parameters
 reinitializeScenicOptions <- function(scenicOptions = NULL){
   if(is.null(scenicOptions)){
     print(paste0("No scenic options provided, initializing with default parameters"))
@@ -317,6 +346,8 @@ reinitializeScenicOptions <- function(scenicOptions = NULL){
   
   return(scenicOptions)
 }
+#changes output directory of scenic, changing all file names to match new directory location
+#if the directory doesnt exist, the function will create it in the working directory
 setOutputDirectory <- function(scenicOptions, outputDirectory = NA){
   if(!(is.na(outputDirectory) | outputDirectory=="")){
     if(!dir.exists(outputDirectory)){
